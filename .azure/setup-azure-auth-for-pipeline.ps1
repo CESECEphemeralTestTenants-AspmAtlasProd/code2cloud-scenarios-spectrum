@@ -7,6 +7,7 @@ param(
     [string] $AppDisplayName = "c2c-prod-github-actions",
     [string] $GitHubRepo = "CESECEphemeralTestTenants-AspmAtlasProd/code2cloud-scenarios",
     [string] $GitHubEnvironment = "prod",
+    [switch] $SkipLogin,
     [switch] $AssignUserAccessAdministrator
 )
 
@@ -18,8 +19,11 @@ function Invoke-Json($Command) {
     return $result | ConvertFrom-Json
 }
 
-Write-Host "Logging in to tenant $TenantId"
-az login --tenant $TenantId --allow-no-subscriptions | Out-Null
+if (-not $SkipLogin) {
+    Write-Host "Logging in to tenant $TenantId"
+    az login --tenant $TenantId --allow-no-subscriptions | Out-Null
+}
+
 az account set --subscription $SubscriptionId
 
 $app = Invoke-Json "az ad app list --display-name '$AppDisplayName' --query '[0]' -o json"
