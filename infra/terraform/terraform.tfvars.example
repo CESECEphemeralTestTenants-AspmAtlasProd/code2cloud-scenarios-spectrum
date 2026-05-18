@@ -1,0 +1,8 @@
+location                     = "eastus"
+resource_prefix              = "c2cprod"
+environment                  = "prod"
+github_repo                  = "CESECEphemeralTestTenants-AspmAtlasProd/code2cloud-scenarios"
+workflow_principal_object_id = "<service-principal-object-id>"
+enable_defender_plans        = true
+aks_node_count               = 1
+aks_node_size                = "Standard_D2s_v4"

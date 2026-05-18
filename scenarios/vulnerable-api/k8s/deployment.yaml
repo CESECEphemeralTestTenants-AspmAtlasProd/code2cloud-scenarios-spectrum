@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vuln-api
+  namespace: __NAMESPACE__
+  labels:
+    app: vuln-api
+    c2c-scenario: vulnerable-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vuln-api
+  template:
+    metadata:
+      labels:
+        app: vuln-api
+        c2c-scenario: vulnerable-api
+    spec:
+      containers:
+        - name: vuln-api
+          image: __IMAGE__
+          ports:
+            - containerPort: 3001
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vuln-api
+  namespace: __NAMESPACE__
+spec:
+  type: ClusterIP
+  selector:
+    app: vuln-api
+  ports:
+    - port: 80
+      targetPort: 3001

@@ -1,0 +1,17 @@
+{
+  "name": "c2c-vuln-api",
+  "version": "1.0.0",
+  "description": "Intentional C2C vulnerability scenario using ajv CVE-2020-15366 and lodash CVE-2020-8203.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ajv": "6.12.2",
+    "express": "4.17.1",
+    "lodash": "4.17.15"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}

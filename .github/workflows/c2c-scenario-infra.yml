@@ -1,0 +1,81 @@
+name: C2C Scenario Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Apply Terraform changes
+        type: boolean
+        default: false
+      resource_prefix:
+        description: Azure resource prefix
+        type: string
+        default: c2cprod
+      location:
+        description: Azure region
+        type: string
+        default: eastus
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  terraform:
+    name: Terraform plan/apply
+    runs-on: ubuntu-latest
+    environment: prod
+    env:
+      TF_VAR_location: ${{ inputs.location || vars.AZURE_LOCATION }}
+      TF_VAR_resource_prefix: ${{ inputs.resource_prefix || vars.RESOURCE_PREFIX }}
+      TF_VAR_environment: prod
+      TF_VAR_github_repo: ${{ github.repository }}
+      TF_VAR_workflow_principal_object_id: ${{ vars.WORKFLOW_PRINCIPAL_OBJECT_ID }}
+      TF_VAR_enable_defender_plans: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
+      - name: Terraform fmt
+        working-directory: infra/terraform
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        working-directory: infra/terraform
+        run: terraform init
+
+      - name: Terraform validate
+        working-directory: infra/terraform
+        run: terraform validate
+
+      - name: Terraform plan
+        working-directory: infra/terraform
+        run: terraform plan -out=tfplan
+
+      - name: Upload plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: infra/terraform/tfplan
+
+      - name: Terraform apply
+        if: inputs.apply == true
+        working-directory: infra/terraform
+        run: terraform apply -auto-approve tfplan
+
+      - name: Print outputs
+        if: inputs.apply == true
+        working-directory: infra/terraform
+        run: terraform output

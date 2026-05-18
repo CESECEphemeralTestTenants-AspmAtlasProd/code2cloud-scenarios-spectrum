@@ -1,0 +1,171 @@
+name: C2C Vulnerable Container Build and Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_to_aks:
+        description: Deploy vulnerable images to AKS
+        type: boolean
+        default: true
+  push:
+    branches: [main]
+    paths:
+      - scenarios/**
+      - .github/workflows/c2c-vuln-container-build.yml
+
+permissions:
+  contents: read
+  id-token: write
+  security-events: write
+
+env:
+  IMAGE_PREFIX: c2cprod
+  IMAGE_NAME_APP: c2cprod/vuln-app
+  IMAGE_NAME_API: c2cprod/vuln-api
+  K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE || 'c2c-scenarios' }}
+
+jobs:
+  build-push-deploy:
+    name: Build, scan, push, deploy
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Trivy FS scan - vuln-app
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: ./scenarios/vulnerable-container
+          format: sarif
+          output: trivy-fs-vuln-app.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+
+      - name: Upload FS SARIF - vuln-app
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-fs-vuln-app.sarif
+          category: trivy-fs-vuln-app
+
+      - name: Trivy FS scan - vuln-api
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: ./scenarios/vulnerable-api
+          format: sarif
+          output: trivy-fs-vuln-api.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+
+      - name: Upload FS SARIF - vuln-api
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-fs-vuln-api.sarif
+          category: trivy-fs-vuln-api
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        run: az acr login --name ${{ vars.ACR_NAME }}
+
+      - name: Build and push vuln-app
+        run: |
+          ACR=${{ vars.ACR_NAME }}.azurecr.io
+          docker build \
+            --label org.opencontainers.image.source=https://github.com/${{ github.repository }} \
+            --label org.opencontainers.image.revision=${{ github.sha }} \
+            --label com.c2c.workflow.run-id=${{ github.run_id }} \
+            --label com.c2c.vulnerability.primary=CVE-2020-15366 \
+            -t $ACR/${{ env.IMAGE_NAME_APP }}:${{ github.sha }} \
+            -t $ACR/${{ env.IMAGE_NAME_APP }}:run-${{ github.run_id }} \
+            -t $ACR/${{ env.IMAGE_NAME_APP }}:vuln-ajv-CVE-2020-15366 \
+            -t $ACR/${{ env.IMAGE_NAME_APP }}:latest \
+            ./scenarios/vulnerable-container
+          docker push --all-tags $ACR/${{ env.IMAGE_NAME_APP }}
+          DIGEST=$(az acr repository show-manifests --name ${{ vars.ACR_NAME }} --repository ${{ env.IMAGE_NAME_APP }} --query "[?tags[?@=='${{ github.sha }}']].digest | [0]" -o tsv)
+          echo "VULN_APP_DIGEST=$ACR/${{ env.IMAGE_NAME_APP }}@$DIGEST" >> $GITHUB_ENV
+
+      - name: Build and push vuln-api
+        run: |
+          ACR=${{ vars.ACR_NAME }}.azurecr.io
+          docker build \
+            --label org.opencontainers.image.source=https://github.com/${{ github.repository }} \
+            --label org.opencontainers.image.revision=${{ github.sha }} \
+            --label com.c2c.workflow.run-id=${{ github.run_id }} \
+            --label com.c2c.vulnerability.primary=CVE-2020-15366 \
+            --label com.c2c.vulnerability.secondary=CVE-2020-8203 \
+            -t $ACR/${{ env.IMAGE_NAME_API }}:${{ github.sha }} \
+            -t $ACR/${{ env.IMAGE_NAME_API }}:run-${{ github.run_id }} \
+            -t $ACR/${{ env.IMAGE_NAME_API }}:vuln-ajv-CVE-2020-15366 \
+            -t $ACR/${{ env.IMAGE_NAME_API }}:vuln-lodash-CVE-2020-8203 \
+            -t $ACR/${{ env.IMAGE_NAME_API }}:latest \
+            ./scenarios/vulnerable-api
+          docker push --all-tags $ACR/${{ env.IMAGE_NAME_API }}
+          DIGEST=$(az acr repository show-manifests --name ${{ vars.ACR_NAME }} --repository ${{ env.IMAGE_NAME_API }} --query "[?tags[?@=='${{ github.sha }}']].digest | [0]" -o tsv)
+          echo "VULN_API_DIGEST=$ACR/${{ env.IMAGE_NAME_API }}@$DIGEST" >> $GITHUB_ENV
+
+      - name: Trivy image scan - vuln-app
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.VULN_APP_DIGEST }}
+          format: sarif
+          output: trivy-image-vuln-app.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+
+      - name: Upload image SARIF - vuln-app
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image-vuln-app.sarif
+          category: container-scanning-vuln-app
+
+      - name: Trivy image scan - vuln-api
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.VULN_API_DIGEST }}
+          format: sarif
+          output: trivy-image-vuln-api.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+
+      - name: Upload image SARIF - vuln-api
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image-vuln-api.sarif
+          category: container-scanning-vuln-api
+
+      - name: Deploy to AKS
+        if: github.event.inputs.deploy_to_aks != 'false'
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ vars.RESOURCE_GROUP_NAME }} \
+            --name ${{ vars.AKS_CLUSTER_NAME }} \
+            --overwrite-existing
+          kubectl create namespace ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+          sed "s|__IMAGE__|${VULN_APP_DIGEST}|g; s|__NAMESPACE__|${{ env.K8S_NAMESPACE }}|g" scenarios/vulnerable-container/k8s/deployment.yaml | kubectl apply -f -
+          sed "s|__IMAGE__|${VULN_API_DIGEST}|g; s|__NAMESPACE__|${{ env.K8S_NAMESPACE }}|g" scenarios/vulnerable-api/k8s/deployment.yaml | kubectl apply -f -
+          kubectl rollout status deployment/vuln-app -n ${{ env.K8S_NAMESPACE }} --timeout=180s
+          kubectl rollout status deployment/vuln-api -n ${{ env.K8S_NAMESPACE }} --timeout=180s
+
+      - name: Print correlation summary
+        run: |
+          cat <<EOF
+          C2C correlation summary
+          Repository: ${{ github.repository }}
+          Commit: ${{ github.sha }}
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ACR: ${{ vars.ACR_NAME }}.azurecr.io
+          vuln-app digest: $VULN_APP_DIGEST
+          vuln-api digest: $VULN_API_DIGEST
+          Shared CVE: CVE-2020-15366 / ajv@6.12.2
+          Secondary CVE: CVE-2020-8203 / lodash@4.17.15
+          AKS cluster: ${{ vars.AKS_CLUSTER_NAME }}
+          Namespace: ${{ env.K8S_NAMESPACE }}
+          EOF
