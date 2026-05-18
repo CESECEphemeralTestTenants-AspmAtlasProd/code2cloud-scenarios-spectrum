@@ -13,8 +13,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Invoke-Json($Command) {
-    $result = Invoke-Expression $Command
+function ConvertFrom-AzJson($ScriptBlock) {
+    $result = & $ScriptBlock
     if (-not $result) { return $null }
     return $result | ConvertFrom-Json
 }
@@ -26,25 +26,26 @@ if (-not $SkipLogin) {
 
 az account set --subscription $SubscriptionId
 
-$app = Invoke-Json "az ad app list --display-name '$AppDisplayName' --query '[0]' -o json"
+$app = ConvertFrom-AzJson { az ad app list --display-name $AppDisplayName --query "[0]" -o json }
 if (-not $app) {
     Write-Host "Creating app registration $AppDisplayName"
-    $app = Invoke-Json "az ad app create --display-name '$AppDisplayName' --sign-in-audience AzureADMyOrg -o json"
+    $app = ConvertFrom-AzJson { az ad app create --display-name $AppDisplayName --sign-in-audience AzureADMyOrg -o json }
 }
 
 $clientId = $app.appId
 $appObjectId = $app.id
 
-$sp = Invoke-Json "az ad sp list --filter \"appId eq '$clientId'\" --query '[0]' -o json"
+$sp = ConvertFrom-AzJson { az ad sp list --filter "appId eq '$clientId'" --query "[0]" -o json }
 if (-not $sp) {
     Write-Host "Creating service principal for $AppDisplayName"
-    $sp = Invoke-Json "az ad sp create --id '$clientId' -o json"
+    $sp = ConvertFrom-AzJson { az ad sp create --id $clientId -o json }
 }
 
 $spObjectId = $sp.id
 
 function Ensure-FederatedCredential($Name, $Subject) {
-    $existing = Invoke-Json "az ad app federated-credential list --id '$clientId' --query \"[?name=='$Name'] | [0]\" -o json"
+    $credentials = ConvertFrom-AzJson { az ad app federated-credential list --id $clientId -o json }
+    $existing = $credentials | Where-Object { $_.name -eq $Name } | Select-Object -First 1
     if ($existing) {
         Write-Host "Federated credential $Name already exists"
         return
