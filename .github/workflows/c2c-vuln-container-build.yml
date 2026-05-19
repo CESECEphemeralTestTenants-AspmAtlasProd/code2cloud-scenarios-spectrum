@@ -90,7 +90,13 @@ jobs:
             ./scenarios/vulnerable-container
           docker push --all-tags $ACR/${{ env.IMAGE_NAME_APP }}
           DIGEST=$(az acr repository show-manifests --name ${{ vars.ACR_NAME }} --repository ${{ env.IMAGE_NAME_APP }} --query "[?tags[?@=='${{ github.sha }}']].digest | [0]" -o tsv)
-          echo "VULN_APP_DIGEST=$ACR/${{ env.IMAGE_NAME_APP }}@$DIGEST" >> $GITHUB_ENV
+          if [ -z "$DIGEST" ]; then
+            echo "::error::Failed to resolve digest for $ACR/${{ env.IMAGE_NAME_APP }}:${{ github.sha }}"
+            exit 1
+          fi
+          VULN_APP_DIGEST="$ACR/${{ env.IMAGE_NAME_APP }}@$DIGEST"
+          echo "VULN_APP_DIGEST=$VULN_APP_DIGEST" >> $GITHUB_ENV
+          echo "Resolved vuln-app digest: $VULN_APP_DIGEST"
 
       - name: Build and push vuln-api
         run: |
@@ -109,7 +115,13 @@ jobs:
             ./scenarios/vulnerable-api
           docker push --all-tags $ACR/${{ env.IMAGE_NAME_API }}
           DIGEST=$(az acr repository show-manifests --name ${{ vars.ACR_NAME }} --repository ${{ env.IMAGE_NAME_API }} --query "[?tags[?@=='${{ github.sha }}']].digest | [0]" -o tsv)
-          echo "VULN_API_DIGEST=$ACR/${{ env.IMAGE_NAME_API }}@$DIGEST" >> $GITHUB_ENV
+          if [ -z "$DIGEST" ]; then
+            echo "::error::Failed to resolve digest for $ACR/${{ env.IMAGE_NAME_API }}:${{ github.sha }}"
+            exit 1
+          fi
+          VULN_API_DIGEST="$ACR/${{ env.IMAGE_NAME_API }}@$DIGEST"
+          echo "VULN_API_DIGEST=$VULN_API_DIGEST" >> $GITHUB_ENV
+          echo "Resolved vuln-api digest: $VULN_API_DIGEST"
 
       - name: Trivy image scan - vuln-app
         uses: aquasecurity/trivy-action@master
@@ -156,16 +168,33 @@ jobs:
 
       - name: Print correlation summary
         run: |
-          cat <<EOF
-          C2C correlation summary
-          Repository: ${{ github.repository }}
-          Commit: ${{ github.sha }}
-          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          ACR: ${{ vars.ACR_NAME }}.azurecr.io
-          vuln-app digest: $VULN_APP_DIGEST
-          vuln-api digest: $VULN_API_DIGEST
-          Shared CVE: CVE-2020-15366 / ajv@6.12.2
-          Secondary CVE: CVE-2020-8203 / lodash@4.17.15
-          AKS cluster: ${{ vars.AKS_CLUSTER_NAME }}
-          Namespace: ${{ env.K8S_NAMESPACE }}
-          EOF
+          {
+            echo "C2C correlation summary"
+            echo "Repository: ${{ github.repository }}"
+            echo "Commit: ${{ github.sha }}"
+            echo "Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "ACR: ${{ vars.ACR_NAME }}.azurecr.io"
+            echo "vuln-app digest: $VULN_APP_DIGEST"
+            echo "vuln-api digest: $VULN_API_DIGEST"
+            echo "Shared CVE: CVE-2020-15366 / ajv@6.12.2"
+            echo "Secondary CVE: CVE-2020-8203 / lodash@4.17.15"
+            echo "AKS cluster: ${{ vars.AKS_CLUSTER_NAME }}"
+            echo "Namespace: ${{ env.K8S_NAMESPACE }}"
+          } | tee correlation-summary.txt
+
+          {
+            echo "## C2C correlation summary"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Repository | ${{ github.repository }} |"
+            echo "| Commit | ${{ github.sha }} |"
+            echo "| Workflow run | ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} |"
+            echo "| ACR | ${{ vars.ACR_NAME }}.azurecr.io |"
+            echo "| vuln-app digest | $VULN_APP_DIGEST |"
+            echo "| vuln-api digest | $VULN_API_DIGEST |"
+            echo "| Shared CVE | CVE-2020-15366 / ajv@6.12.2 |"
+            echo "| Secondary CVE | CVE-2020-8203 / lodash@4.17.15 |"
+            echo "| AKS cluster | ${{ vars.AKS_CLUSTER_NAME }} |"
+            echo "| Namespace | ${{ env.K8S_NAMESPACE }} |"
+          } >> $GITHUB_STEP_SUMMARY

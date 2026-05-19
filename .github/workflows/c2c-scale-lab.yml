@@ -1,0 +1,299 @@
+name: C2C Scale Lab Build and Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_count:
+        description: Number of catalog images to build from this repo
+        type: number
+        default: 10
+      containers_per_image:
+        description: AKS pod replicas per image
+        type: number
+        default: 5
+      image_offset:
+        description: Catalog offset for multi-repo sharding
+        type: number
+        default: 0
+      deploy_to_aks:
+        description: Deploy scaled workloads to AKS
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write
+  security-events: write
+
+env:
+  IMAGE_PREFIX: ${{ vars.RESOURCE_PREFIX || 'c2cprod' }}
+  K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE || 'c2c-scenarios' }}
+
+jobs:
+  scale-lab:
+    name: Build and deploy scaled C2C lab
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate scale inputs
+        run: |
+          IMAGE_COUNT='${{ inputs.image_count }}'
+          CONTAINERS_PER_IMAGE='${{ inputs.containers_per_image }}'
+          IMAGE_OFFSET='${{ inputs.image_offset }}'
+
+          if [ "$IMAGE_COUNT" -lt 1 ] || [ "$IMAGE_COUNT" -gt 10 ]; then
+            echo "::error::image_count must be between 1 and 10"
+            exit 1
+          fi
+
+          if [ "$CONTAINERS_PER_IMAGE" -lt 1 ] || [ "$CONTAINERS_PER_IMAGE" -gt 20 ]; then
+            echo "::error::containers_per_image must be between 1 and 20"
+            exit 1
+          fi
+
+          if [ "$IMAGE_OFFSET" -lt 0 ] || [ "$IMAGE_OFFSET" -gt 9 ]; then
+            echo "::error::image_offset must be between 0 and 9"
+            exit 1
+          fi
+
+          if [ $((IMAGE_OFFSET + IMAGE_COUNT)) -gt 10 ]; then
+            echo "::error::image_offset + image_count must be <= 10"
+            exit 1
+          fi
+
+          echo "IMAGE_COUNT=$IMAGE_COUNT" >> $GITHUB_ENV
+          echo "CONTAINERS_PER_IMAGE=$CONTAINERS_PER_IMAGE" >> $GITHUB_ENV
+          echo "IMAGE_OFFSET=$IMAGE_OFFSET" >> $GITHUB_ENV
+          echo "TOTAL_CONTAINERS=$((IMAGE_COUNT * CONTAINERS_PER_IMAGE))" >> $GITHUB_ENV
+
+      - name: Trivy FS scan - web base
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: ./scenarios/vulnerable-container
+          format: sarif
+          output: trivy-fs-scale-web-base.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+
+      - name: Upload FS SARIF - web base
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-fs-scale-web-base.sarif
+          category: trivy-fs-scale-web-base
+
+      - name: Trivy FS scan - api base
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: ./scenarios/vulnerable-api
+          format: sarif
+          output: trivy-fs-scale-api-base.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+
+      - name: Upload FS SARIF - api base
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-fs-scale-api-base.sarif
+          category: trivy-fs-scale-api-base
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        run: az acr login --name ${{ vars.ACR_NAME }}
+
+      - name: Build and push scaled image catalog
+        run: |
+          ACR=${{ vars.ACR_NAME }}.azurecr.io
+          mkdir -p .c2c-scale
+          : > .c2c-scale/images.txt
+
+          names=(
+            nebula-ledger
+            quartz-gateway
+            ember-cache
+            saffron-api
+            cobalt-worker
+            opal-portal
+            atlas-broker
+            marble-events
+            cinder-cron
+            verdant-sync
+          )
+
+          contexts=(
+            vulnerable-container
+            vulnerable-api
+            vulnerable-container
+            vulnerable-api
+            vulnerable-api
+            vulnerable-container
+            vulnerable-api
+            vulnerable-container
+            vulnerable-api
+            vulnerable-container
+          )
+
+          ports=(3000 3001 3000 3001 3001 3000 3001 3000 3001 3000)
+
+          for ((i = IMAGE_OFFSET; i < IMAGE_OFFSET + IMAGE_COUNT; i++)); do
+            image_name="${names[$i]}"
+            context="${contexts[$i]}"
+            port="${ports[$i]}"
+            repository="${IMAGE_PREFIX}/${image_name}"
+
+            docker_labels=(
+              --label org.opencontainers.image.source=https://github.com/${{ github.repository }}
+              --label org.opencontainers.image.revision=${{ github.sha }}
+              --label com.c2c.workflow.run-id=${{ github.run_id }}
+              --label com.c2c.scale.image-name="$image_name"
+              --label com.c2c.vulnerability.primary=CVE-2020-15366
+            )
+
+            docker_tags=(
+              -t "$ACR/$repository:${{ github.sha }}"
+              -t "$ACR/$repository:run-${{ github.run_id }}"
+              -t "$ACR/$repository:vuln-ajv-CVE-2020-15366"
+              -t "$ACR/$repository:latest"
+            )
+
+            if [ "$context" = "vulnerable-api" ]; then
+              docker_labels+=(--label com.c2c.vulnerability.secondary=CVE-2020-8203)
+              docker_tags+=(-t "$ACR/$repository:vuln-lodash-CVE-2020-8203")
+            fi
+
+            docker build \
+              "${docker_labels[@]}" \
+              "${docker_tags[@]}" \
+              "./scenarios/$context"
+
+            docker push --all-tags "$ACR/$repository"
+            digest=$(az acr repository show-manifests --name ${{ vars.ACR_NAME }} --repository "$repository" --query "[?tags[?@=='${{ github.sha }}']].digest | [0]" -o tsv)
+
+            if [ -z "$digest" ]; then
+              echo "::error::Failed to resolve digest for $ACR/$repository:${{ github.sha }}"
+              exit 1
+            fi
+
+            image_ref="$ACR/$repository@$digest"
+            echo "$image_name|$image_ref|$context|$port" >> .c2c-scale/images.txt
+            echo "Resolved $image_name digest: $image_ref"
+          done
+
+      - name: Deploy scaled workloads to AKS
+        if: inputs.deploy_to_aks
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ vars.RESOURCE_GROUP_NAME }} \
+            --name ${{ vars.AKS_CLUSTER_NAME }} \
+            --overwrite-existing
+
+          kubectl create namespace ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+
+          while IFS='|' read -r workload image_ref context port; do
+            cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: $workload
+  namespace: ${{ env.K8S_NAMESPACE }}
+  labels:
+    app: $workload
+    c2c-scenario: scale-lab
+    c2c-source-context: $context
+spec:
+  replicas: $CONTAINERS_PER_IMAGE
+  selector:
+    matchLabels:
+      app: $workload
+  template:
+    metadata:
+      labels:
+        app: $workload
+        c2c-scenario: scale-lab
+        c2c-source-context: $context
+    spec:
+      containers:
+        - name: $workload
+          image: $image_ref
+          ports:
+            - containerPort: $port
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: $port
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: $workload
+  namespace: ${{ env.K8S_NAMESPACE }}
+spec:
+  type: ClusterIP
+  selector:
+    app: $workload
+  ports:
+    - port: 80
+      targetPort: $port
+EOF
+            kubectl rollout status deployment/$workload -n ${{ env.K8S_NAMESPACE }} --timeout=240s
+          done < .c2c-scale/images.txt
+
+      - name: Print scale correlation summary
+        run: |
+          {
+            echo "C2C scale lab summary"
+            echo "Repository: ${{ github.repository }}"
+            echo "Commit: ${{ github.sha }}"
+            echo "Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "ACR: ${{ vars.ACR_NAME }}.azurecr.io"
+            echo "AKS cluster: ${{ vars.AKS_CLUSTER_NAME }}"
+            echo "Namespace: ${{ env.K8S_NAMESPACE }}"
+            echo "Image offset: $IMAGE_OFFSET"
+            echo "Images built: $IMAGE_COUNT"
+            echo "Containers per image: $CONTAINERS_PER_IMAGE"
+            echo "Runtime containers requested: $TOTAL_CONTAINERS"
+            echo "Shared CVE: CVE-2020-15366 / ajv@6.12.2"
+            echo "Secondary CVE: CVE-2020-8203 / lodash@4.17.15"
+            echo
+            cat .c2c-scale/images.txt
+          } | tee scale-correlation-summary.txt
+
+          {
+            echo "## C2C scale lab summary"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Repository | ${{ github.repository }} |"
+            echo "| Commit | ${{ github.sha }} |"
+            echo "| Workflow run | ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} |"
+            echo "| Images built | $IMAGE_COUNT |"
+            echo "| Containers per image | $CONTAINERS_PER_IMAGE |"
+            echo "| Runtime containers requested | $TOTAL_CONTAINERS |"
+            echo "| AKS cluster | ${{ vars.AKS_CLUSTER_NAME }} |"
+            echo "| Namespace | ${{ env.K8S_NAMESPACE }} |"
+            echo
+            echo "| Workload | Image digest | Source context | Port |"
+            echo "| --- | --- | --- | --- |"
+            while IFS='|' read -r workload image_ref context port; do
+              echo "| $workload | $image_ref | $context | $port |"
+            done < .c2c-scale/images.txt
+          } >> $GITHUB_STEP_SUMMARY
