@@ -8,7 +8,7 @@
   },
   "dependencies": {
     "ajv": "6.12.2",
-    "express": "4.17.1"
+    "express": "4.22.0"
   },
   "engines": {
     "node": ">=14.0.0"
