@@ -19,6 +19,8 @@ on:
         description: Deploy scaled workloads to AKS
         type: boolean
         default: true
+  schedule:
+    - cron: '43 */2 * * *'
 
 permissions:
   contents: read
@@ -40,9 +42,9 @@ jobs:
 
       - name: Validate scale inputs
         run: |
-          IMAGE_COUNT='${{ inputs.image_count }}'
-          CONTAINERS_PER_IMAGE='${{ inputs.containers_per_image }}'
-          IMAGE_OFFSET='${{ inputs.image_offset }}'
+          IMAGE_COUNT='${{ inputs.image_count || 10 }}'
+          CONTAINERS_PER_IMAGE='${{ inputs.containers_per_image || 5 }}'
+          IMAGE_OFFSET='${{ inputs.image_offset || 0 }}'
 
           if [ "$IMAGE_COUNT" -lt 1 ] || [ "$IMAGE_COUNT" -gt 10 ]; then
             echo "::error::image_count must be between 1 and 10"
@@ -190,7 +192,7 @@ jobs:
           done
 
       - name: Deploy scaled workloads to AKS
-        if: inputs.deploy_to_aks
+        if: github.event_name == 'schedule' || inputs.deploy_to_aks
         run: |
           az aks get-credentials \
             --resource-group ${{ vars.RESOURCE_GROUP_NAME }} \
